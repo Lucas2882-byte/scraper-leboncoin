@@ -23,6 +23,32 @@ from playwright.sync_api import sync_playwright
 
 import subprocess
 import os
+# --- Auto-install Playwright Chromium si manquant (sans --with-deps) ---
+import os, subprocess
+
+def ensure_chromium():
+    # Dossier de cache par défaut Streamlit Cloud
+    browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/home/appuser/.cache/ms-playwright")
+    chromium_marker = os.path.join(browsers_path, "chromium")
+    if not os.path.exists(chromium_marker):
+        try:
+            os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", browsers_path)
+            # IMPORTANT: pas de --with-deps sur Streamlit Cloud
+            subprocess.run(
+                ["python", "-m", "playwright", "install", "chromium"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            # Affiche le log dans la console Streamlit
+            import streamlit as st
+            st.error("Installation Chromium a échoué.\n" + (e.stdout or ""))
+            raise
+
+ensure_chromium()
+
 
 # Installation auto de Chromium si pas déjà fait
 if not os.path.exists("/home/appuser/.cache/ms-playwright"):
@@ -58,10 +84,10 @@ def fetch_html_with_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
     """Ouvre l'URL avec Chromium headless, scrolle pour charger les cards, renvoie le HTML.
        Si Chromium n'est pas installé, on l'installe puis on retente une fois.
     """
-    import subprocess, os
+    import random
+    from playwright.sync_api import sync_playwright
 
     def _run() -> Optional[str]:
-        from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -94,21 +120,13 @@ def fetch_html_with_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
     try:
         return _run()
     except Exception as e:
-        # Si Chromium pas encore téléchargé -> on l'installe puis on retente 1x
         msg = str(e).lower()
         if "executable doesn't exist" in msg or "playwright install" in msg:
-            try:
-                # Force le chemin par défaut et installe Chromium
-                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/home/appuser/.cache/ms-playwright")
-                subprocess.run(
-                    ["python", "-m", "playwright", "install", "chromium", "--with-deps"],
-                    check=True,
-                )
-                return _run()
-            except Exception as e2:
-                st.warning(f"Installation Playwright/Chromium a échoué: {e2}")
-                return None
+            # Installer Chromium (sans --with-deps) puis retenter
+            ensure_chromium()
+            return _run()
         else:
+            import streamlit as st
             st.warning(f"Playwright a échoué: {e}")
             return None
 
