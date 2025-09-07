@@ -1,7 +1,5 @@
 streamlit
-requests
+playwright
 beautifulsoup4
 lxml
 pandas
-numpy
-playwright
