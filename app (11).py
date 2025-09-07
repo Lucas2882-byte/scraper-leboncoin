@@ -21,6 +21,20 @@ from bs4 import BeautifulSoup
 # Playwright pour rendre la page et bypass le JS
 from playwright.sync_api import sync_playwright
 
+import subprocess
+import os
+
+# Installation auto de Chromium si pas déjà fait
+if not os.path.exists("/home/appuser/.cache/ms-playwright"):
+    try:
+        subprocess.run(
+            ["playwright", "install", "--with-deps", "chromium"],
+            check=True
+        )
+    except Exception as e:
+        print("Erreur installation Playwright/Chromium:", e)
+
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
