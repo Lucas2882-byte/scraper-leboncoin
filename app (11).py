@@ -5,15 +5,13 @@
 #
 # ⚠️ Avertissements juridiques/techniques :
 # - Respecte les CGU/robots.txt de Leboncoin et les lois locales.
-# - Utilise un rate limiting agressif (sleep) et des User‑Agent variés.
-# - Ce scraper est best‑effort : les sélecteurs/structure peuvent
-#   changer. Mets à jour l'adapter "LeboncoinAdapter" si nécessaire.
-# - Il n'y a aucun lien avec Leboncoin ; ce code est fourni à titre
-#   éducatif. Tu es responsable de son usage.
+# - Utilise un rate limiting agressif (sleep) et des User-Agent variés.
+# - Ce scraper est best-effort : la structure peut changer => mets à jour l’adapter si besoin.
+# - Ce code n’est affilié à aucun service ; usage éducatif uniquement.
 #
 # Déploiement :
-# - Mets ce fichier sur GitHub et déploie-le sur Streamlit Cloud.
-# - Ajoute un requirements.txt (exemple en bas du fichier).
+# - Déploie sur Streamlit Cloud avec requirements.txt + packages.txt + startup.sh
+#   (voir README/mes instructions).
 # -------------------------------------------------------------
 
 import re
@@ -21,13 +19,20 @@ import time
 import json
 import random
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
+
+# Optionnel: Playwright pour contourner le rendu client/anti-bot
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_OK = True
+except Exception:
+    PLAYWRIGHT_OK = False
 
 # ----------------------------
 # Utilitaires
@@ -115,25 +120,20 @@ class LeboncoinAdapter:
     BASE_URL = "https://www.leboncoin.fr/recherche/"
 
     @staticmethod
-    def build_search_url(query: str, category: Optional[str] = None, locations: Optional[str] = None, price_min: Optional[int] = None, price_max: Optional[int] = None, page: int = 1) -> str:
-        """Construit une URL de recherche simple.
-        Notes : LBC encode via querystring ; on reste générique.
-        """
-        params = {
-            "text": query.strip(),
-            "page": page,
-        }
+    def build_search_url(query: str, category: Optional[str] = None, locations: Optional[str] = None,
+                         price_min: Optional[int] = None, price_max: Optional[int] = None, page: int = 1) -> str:
+        """Construit une URL de recherche simple."""
+        params = {"text": query.strip(), "page": page}
         if price_min is not None:
             params["price"] = f"{price_min}-{price_max if price_max is not None else ''}"
         if locations:
-            # LBC supporte locations=France ou codes postaux/regions via JSON ; on reste simple ici
             params["locations"] = locations
-        # Construction naïve
         q = "&".join([f"{k}={requests.utils.quote(str(v))}" for k, v in params.items()])
         return f"{LeboncoinAdapter.BASE_URL}?{q}"
 
+    # --- Récupération HTTP simple (souvent bloqué / HTML partiel) ---
     @staticmethod
-    def fetch_page(url: str, timeout: int = 25) -> Optional[str]:
+    def fetch_page_requests(url: str, timeout: int = 25) -> Optional[str]:
         headers = HEADERS_BASE.copy()
         headers["User-Agent"] = random.choice(USER_AGENTS)
         try:
@@ -144,10 +144,52 @@ class LeboncoinAdapter:
         except requests.RequestException:
             return None
 
+    # --- Récupération via navigateur headless (Playwright) ---
+    @staticmethod
+    def fetch_page_browser(url: str, wait_selector: Optional[str] = None, timeout_ms: int = 25000) -> Optional[str]:
+        if not PLAYWRIGHT_OK:
+            return None
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                context = browser.new_context(
+                    user_agent=random.choice(USER_AGENTS),
+                    viewport={"width": 1280, "height": 1800},
+                )
+                page = context.new_page()
+                page.set_default_timeout(timeout_ms)
+                page.goto(url, wait_until="domcontentloaded")
+
+                # Scroll pour déclencher le lazy-load des cartes
+                for _ in range(6):
+                    page.mouse.wheel(0, 1400)
+                    page.wait_for_timeout(500)
+
+                # Attendre un sélecteur s'il est fourni
+                if wait_selector:
+                    try:
+                        page.wait_for_selector(wait_selector, timeout=6000)
+                    except Exception:
+                        pass
+
+                html = page.content()
+                context.close()
+                browser.close()
+                return html
+        except Exception:
+            return None
+
     @staticmethod
     def parse_listings(html: str) -> List[Listing]:
         """Essaye 2 stratégies :
-        1) Extraire le JSON __NEXT_DATA__ s'il existe (sites Next.js)
+        1) JSON __NEXT_DATA__ s'il existe (sites Next.js)
         2) Fallback : parse HTML via sélecteurs génériques
         """
         soup = BeautifulSoup(html, "html.parser")
@@ -158,7 +200,6 @@ class LeboncoinAdapter:
         if script and script.text:
             try:
                 data = json.loads(script.text)
-                # Heuristique : cherche un tableau d'annonces
                 nodes = (
                     data.get("props", {})
                     .get("pageProps", {})
@@ -278,6 +319,14 @@ with st.sidebar:
     locations = st.text_input("Zone (optionnel)", value="France", help="Laisse 'France' pour national.")
 
     st.divider()
+    st.header("Récupération")
+    use_browser = st.toggle(
+        "Mode navigateur (Playwright)",
+        value=False,
+        help="Utilise Chromium headless pour contourner le rendu client/anti-bot. Nécessite playwright/chromium installés.",
+    )
+
+    st.divider()
     st.header("Heuristiques d'analyse")
     with st.expander("Valeur de référence par pièce (€) — éditable"):
         price_map = DEFAULT_PART_VALUES.copy()
@@ -285,7 +334,6 @@ with st.sidebar:
             price_map[k] = st.number_input(k, value=int(price_map[k]), step=5)
     with st.expander("Patterns de détection (regex) — avancé"):
         patterns = DEFAULT_PART_PATTERNS.copy()
-        # Afficher/éditer sous forme de texte JSON
         pat_json = st.text_area("Regex JSON", value=json.dumps(patterns, indent=2), height=240)
         try:
             patterns = json.loads(pat_json)
@@ -294,14 +342,16 @@ with st.sidebar:
             patterns = DEFAULT_PART_PATTERNS
 
     negotiation_pct = st.slider("Hypothèse de négociation (%)", 0, 30, 10)
-    dismantle_bonus_pct = st.slider("Bonus 'démontage' vs revente pièces (%)", 0, 30, 5,
-                                    help="Prime appliquée à la valeur pièces si tu démontes/revends séparément")
+    dismantle_bonus_pct = st.slider(
+        "Bonus 'démontage' vs revente pièces (%)", 0, 30, 5,
+        help="Prime appliquée à la valeur pièces si tu démontes/revends séparément"
+    )
 
     st.divider()
     throttle = st.slider("Délai entre pages (s)", 0.5, 5.0, 1.2, step=0.1)
 
 # Boutons d'action
-colA, colB, colC = st.columns([1,1,1])
+colA, colB, colC = st.columns([1, 1, 1])
 start = colA.button("Lancer la recherche")
 export_btn = colB.button("Exporter CSV")
 
@@ -330,11 +380,20 @@ def run_search() -> pd.DataFrame:
                 page=page,
             )
             with st.spinner(f"{q} — page {page} …"):
-                html = LeboncoinAdapter.fetch_page(url)
+                if use_browser:
+                    html = LeboncoinAdapter.fetch_page_browser(
+                        url, wait_selector="a[data-qa-id='aditem_container']"
+                    )
+                    if not html:
+                        html = LeboncoinAdapter.fetch_page_requests(url)
+                else:
+                    html = LeboncoinAdapter.fetch_page_requests(url)
+
             if not html:
                 st.info(f"Aucune donnée récupérée pour {q} page {page} (peut être bloqué/CGU)")
                 time.sleep(throttle)
                 continue
+
             listings = LeboncoinAdapter.parse_listings(html)
             for lst in listings:
                 # Filtre prix
@@ -350,6 +409,7 @@ def run_search() -> pd.DataFrame:
                 lst.target_negotiation_pct = negotiation_pct
                 lst = estimate_margin(lst, negotiation_pct, dismantle_bonus_pct)
                 all_listings.append(lst)
+
             time.sleep(throttle)
 
     # Vers DataFrame
@@ -436,3 +496,4 @@ with results_container:
 # lxml
 # pandas
 # numpy
+# playwright
