@@ -55,8 +55,13 @@ def build_search_url(query: str, locations: Optional[str], page: int) -> str:
 
 
 def fetch_html_with_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
-    """Ouvre l'URL avec Chromium headless, scrolle pour charger les cards, renvoie le HTML."""
-    try:
+    """Ouvre l'URL avec Chromium headless, scrolle pour charger les cards, renvoie le HTML.
+       Si Chromium n'est pas installé, on l'installe puis on retente une fois.
+    """
+    import subprocess, os
+
+    def _run() -> Optional[str]:
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=True,
@@ -74,25 +79,39 @@ def fetch_html_with_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.goto(url, wait_until="domcontentloaded")
-
-            # Scroll progressif pour déclencher le lazy-load
             for _ in range(8):
                 page.mouse.wheel(0, 1400)
                 page.wait_for_timeout(500)
-
-            # Attendre au moins 1 carte si possible (ne bloque pas si absent)
             try:
                 page.wait_for_selector("a[data-qa-id='aditem_container']", timeout=5000)
             except Exception:
                 pass
-
             html = page.content()
             context.close()
             browser.close()
             return html
+
+    try:
+        return _run()
     except Exception as e:
-        st.warning(f"Playwright a échoué: {e}")
-        return None
+        # Si Chromium pas encore téléchargé -> on l'installe puis on retente 1x
+        msg = str(e).lower()
+        if "executable doesn't exist" in msg or "playwright install" in msg:
+            try:
+                # Force le chemin par défaut et installe Chromium
+                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/home/appuser/.cache/ms-playwright")
+                subprocess.run(
+                    ["python", "-m", "playwright", "install", "chromium", "--with-deps"],
+                    check=True,
+                )
+                return _run()
+            except Exception as e2:
+                st.warning(f"Installation Playwright/Chromium a échoué: {e2}")
+                return None
+        else:
+            st.warning(f"Playwright a échoué: {e}")
+            return None
+
 
 
 def parse_listings_from_html(html: str) -> List[Dict]:
